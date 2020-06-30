@@ -18,6 +18,9 @@ package install
 
 import (
 	"fmt"
+	"strconv"
+	"strings"
+
 	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -29,32 +32,36 @@ import (
 	"github.com/vmware-tanzu/velero/pkg/cmd/util/output"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
-	"strconv"
-	"strings"
+
+	"io/ioutil"
+	"os"
+	"path/filepath"
 
 	kubeutil "github.com/vmware-tanzu/velero/pkg/util/kube"
-	"io/ioutil"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"os"
-	"path/filepath"
 )
 
 type InstallOptions struct {
-	Namespace                         string
-	Image                             string
-	BucketName                        string
-	Prefix                            string
-	ProviderName                      string
-	PodAnnotations                    flag.Map
-	DatamgrPodCPURequest               string
-	DatamgrPodMemRequest               string
-	DatamgrPodCPULimit                 string
-	DatamgrPodMemLimit                 string
-	SecretFile                        string
-	NoSecret                          bool
-	DryRun                            bool
+	Namespace                 string
+	DatamgrImage              string
+	BackupDriverImage         string
+	BucketName                string
+	Prefix                    string
+	ProviderName              string
+	PodAnnotations            flag.Map
+	DatamgrPodCPURequest      string
+	DatamgrPodMemRequest      string
+	DatamgrPodCPULimit        string
+	DatamgrPodMemLimit        string
+	BackupDriverPodCPURequest string
+	BackupDriverPodMemRequest string
+	BackupDriverPodCPULimit   string
+	BackupDriverPodMemLimit   string
+	SecretFile                string
+	NoSecret                  bool
+	DryRun                    bool
 }
 
 func (o *InstallOptions) BindFlags(flags *pflag.FlagSet) {
@@ -62,25 +69,35 @@ func (o *InstallOptions) BindFlags(flags *pflag.FlagSet) {
 	flags.StringVar(&o.BucketName, "bucket", o.BucketName, "name of the object storage bucket where backups should be stored")
 	flags.StringVar(&o.SecretFile, "secret-file", o.SecretFile, "file containing credentials for backup and volume provider. If not specified, --no-secret must be used for confirmation. Optional.")
 	flags.BoolVar(&o.NoSecret, "no-secret", o.NoSecret, "flag indicating if a secret should be created. Must be used as confirmation if --secret-file is not provided. Optional.")
-	flags.StringVar(&o.Image, "image", o.Image, "image to use for the Velero and datamgr server pods. Optional.")
+	flags.StringVar(&o.DatamgrImage, "datamgr-image", o.DatamgrImage, "image to use for the Velero and datamgr server pods. Optional.")
+	flags.StringVar(&o.BackupDriverImage, "backup-driver-image", o.BackupDriverImage, "image to use for the Velero and backupDriver server pods. Optional.")
 	flags.StringVar(&o.Prefix, "prefix", o.Prefix, "prefix under which all Velero data should be stored within the bucket. Optional.")
 	flags.Var(&o.PodAnnotations, "pod-annotations", "annotations to add to the Velero and restic pods. Optional. Format is key1=value1,key2=value2")
 	flags.StringVar(&o.DatamgrPodCPURequest, "datamgr-pod-cpu-request", o.DatamgrPodCPURequest, `CPU request for Datamgr pod. A value of "0" is treated as unbounded. Optional.`)
 	flags.StringVar(&o.DatamgrPodMemRequest, "datamgr-pod-mem-request", o.DatamgrPodMemRequest, `memory request for Datamgr pod. A value of "0" is treated as unbounded. Optional.`)
 	flags.StringVar(&o.DatamgrPodCPULimit, "datamgr-pod-cpu-limit", o.DatamgrPodCPULimit, `CPU limit for Datamgr pod. A value of "0" is treated as unbounded. Optional.`)
 	flags.StringVar(&o.DatamgrPodMemLimit, "datamgr-pod-mem-limit", o.DatamgrPodMemLimit, `memory limit for Datamgr pod. A value of "0" is treated as unbounded. Optional.`)
+	flags.StringVar(&o.BackupDriverPodCPURequest, "backup-driver-pod-cpu-request", o.BackupDriverPodCPURequest, `CPU request for backup-driver pod. A value of "0" is treated as unbounded. Optional.`)
+	flags.StringVar(&o.BackupDriverPodMemRequest, "backup-driver-pod-mem-request", o.BackupDriverPodMemRequest, `memory request for backup-driver pod. A value of "0" is treated as unbounded. Optional.`)
+	flags.StringVar(&o.BackupDriverPodCPULimit, "backup-driver-pod-cpu-limit", o.BackupDriverPodCPULimit, `CPU limit for backup-driver pod. A value of "0" is treated as unbounded. Optional.`)
+	flags.StringVar(&o.BackupDriverPodMemLimit, "backup-driver-pod-mem-limit", o.BackupDriverPodMemLimit, `memory limit for backup-driver pod. A value of "0" is treated as unbounded. Optional.`)
 	flags.BoolVar(&o.DryRun, "dry-run", o.DryRun, "generate resources, but don't send them to the cluster. Use with -o. Optional.")
 }
 
 func NewInstallOptions() *InstallOptions {
 	return &InstallOptions{
 		Namespace:                 "velero",
-		Image:                     install.DefaultImage,
+		DatamgrImage:              install.DefaultDatamgrImage,
+		BackupDriverImage:         install.DefaultBackupDriverImage,
 		PodAnnotations:            flag.NewMap(),
 		DatamgrPodCPURequest:      install.DefaultDatamgrPodCPURequest,
 		DatamgrPodMemRequest:      install.DefaultDatamgrPodMemRequest,
 		DatamgrPodCPULimit:        install.DefaultDatamgrPodCPULimit,
 		DatamgrPodMemLimit:        install.DefaultDatamgrPodMemLimit,
+		BackupDriverPodCPURequest: install.DefaultBackupDriverPodCPURequest,
+		BackupDriverPodMemRequest: install.DefaultBackupDriverPodMemRequest,
+		BackupDriverPodCPULimit:   install.DefaultBackupDriverPodCPULimit,
+		BackupDriverPodMemLimit:   install.DefaultBackupDriverPodMemLimit,
 	}
 }
 
@@ -102,15 +119,22 @@ func (o *InstallOptions) AsDatamgrOptions() (*install.DatamgrOptions, error) {
 		return nil, err
 	}
 
+	backupdriverPodResources, err := kubeutil.ParseResourceRequirements(o.BackupDriverPodCPURequest, o.BackupDriverPodMemRequest, o.BackupDriverPodCPULimit, o.BackupDriverPodMemLimit)
+	if err != nil {
+		return nil, err
+	}
+
 	return &install.DatamgrOptions{
-		Namespace:                         o.Namespace,
-		Image:                             o.Image,
-		ProviderName:                      o.ProviderName,
-		Bucket:                            o.BucketName,
-		Prefix:                            o.Prefix,
-		PodAnnotations:                    o.PodAnnotations.Data(),
-		DatamgrPodResources:			   datamgrPodResources,
-		SecretData:                        secretData,
+		Namespace:                o.Namespace,
+		DatamgrImage:             o.DatamgrImage,
+		BackupDriverImage:        o.BackupDriverImage,
+		ProviderName:             o.ProviderName,
+		Bucket:                   o.BucketName,
+		Prefix:                   o.Prefix,
+		PodAnnotations:           o.PodAnnotations.Data(),
+		DatamgrPodResources:      datamgrPodResources,
+		BackupDriverPodResources: backupdriverPodResources,
+		SecretData:               secretData,
 	}, nil
 }
 
@@ -118,8 +142,8 @@ func NewCommand(f client.Factory) *cobra.Command {
 	o := NewInstallOptions()
 	c := &cobra.Command{
 		Use:   "install",
-		Short: "Install data manager",
-		Long: "Install data manager",
+		Short: "Install backup driver and data manager",
+		Long:  "Install backup driver and data manager",
 		Run: func(c *cobra.Command, args []string) {
 			cmd.CheckError(o.Complete(args, f))
 			cmd.CheckError(o.Run(c, f))
@@ -155,10 +179,10 @@ func GetVersionFromImage(containers []v1.Container, imageName string) string {
 }
 
 func GetVeleroVersion(f client.Factory) (string, error) {
-    clientset, err := f.KubeClient()
-    if err != nil {
-        fmt.Println("Failed to get kubeclient.")
-        return "", err
+	clientset, err := f.KubeClient()
+	if err != nil {
+		fmt.Println("Failed to get kubeclient.")
+		return "", err
 	}
 	deploymentList, err := clientset.AppsV1().Deployments("velero").List(metav1.ListOptions{})
 	if err != nil {
@@ -196,12 +220,12 @@ func CompareVersion(currentVersion string, minVersion string) int {
 	curVerArr := strings.Split(currentVersion[1:], ".")
 	minVerArr := strings.Split(minVersion[1:], ".")
 
-	for index:=0; index < max(len(curVerArr), len(minVerArr)); index++ {
+	for index := 0; index < max(len(curVerArr), len(minVerArr)); index++ {
 		var curVerDigit, minVerDigit int
 		if index < len(curVerArr) {
 			curVerDigit, _ = strconv.Atoi(curVerArr[index])
 		} else {
-			curVerDigit = 0	// Substitute 0 if a position is missing
+			curVerDigit = 0 // Substitute 0 if a position is missing
 		}
 		if index < len(minVerArr) {
 			minVerDigit, _ = strconv.Atoi(minVerArr[index])
@@ -214,7 +238,7 @@ func CompareVersion(currentVersion string, minVersion string) int {
 			return 1
 		}
 	}
-    return 0
+	return 0
 }
 
 func CheckCSIVersion(containers []v1.Container) (bool, bool, error) {
@@ -237,7 +261,7 @@ func CheckCSIVersion(containers []v1.Container) (bool, bool, error) {
 			csi_syncer_version = utils.CsiMinVersion
 		}
 	}
-	if CompareVersion(csi_driver_version, utils.CsiMinVersion) >=0 && CompareVersion(csi_syncer_version, utils.CsiMinVersion) >=0 {
+	if CompareVersion(csi_driver_version, utils.CsiMinVersion) >= 0 && CompareVersion(csi_syncer_version, utils.CsiMinVersion) >= 0 {
 		isVersionOK = true
 	}
 	return true, isVersionOK, nil
@@ -272,7 +296,7 @@ func CheckCSIInstalled(f client.Factory) (bool, bool, error) {
 func (o *InstallOptions) Run(c *cobra.Command, f client.Factory) error {
 	var resources *unstructured.UnstructuredList
 
-	isLocalMode := utils.GetBool(install.DefaultImageLocalMode, false)
+	isLocalMode := utils.GetBool(install.DefaultDatamgrImageLocalMode, false)
 	fmt.Printf("The Image LocalMode: %v\n", isLocalMode)
 	if isLocalMode {
 		fmt.Println("Local mode set, skipping data manager installation")
@@ -306,9 +330,9 @@ func (o *InstallOptions) Run(c *cobra.Command, f client.Factory) error {
 	// Check velero vsphere plugin image repo
 	err = o.CheckPluginImageRepo(f)
 	if err != nil {
-		fmt.Printf("Failed to check plugin image repo, error msg: %s. Using default datamanager image %s\n", err.Error(), o.Image)
+		fmt.Printf("Failed to check plugin image repo, error msg: %s. Using default datamanager image %s\n", err.Error(), o.DatamgrImage)
 	} else {
-		fmt.Printf("Using datamanger image %s.\n", o.Image)
+		fmt.Printf("Using datamanger image %s.\n", o.DatamgrImage)
 	}
 
 	vo, err := o.AsDatamgrOptions()
@@ -350,8 +374,14 @@ func (o *InstallOptions) Run(c *cobra.Command, f client.Factory) error {
 	if _, err = install.DaemonSetIsReady(factory, o.Namespace, nNodes); err != nil {
 		return errors.Wrap(err, errorMsg)
 	}
-
 	fmt.Printf("Data manager is installed! ⛵ Use 'kubectl logs daemonset/datamgr-for-vsphere-plugin -n %s' to view the status.\n", o.Namespace)
+
+	fmt.Println("Waiting for backup-driver deployment to be ready.")
+	if _, err = install.DeploymentIsReady(factory, o.Namespace); err != nil {
+		return errors.Wrap(err, errorMsg)
+	}
+	fmt.Printf("BackupDriver is installed! ⛵ Use 'kubectl logs deployment/backup-driver -n %s' to view the status.\n", o.Namespace)
+
 	return nil
 }
 
@@ -378,7 +408,8 @@ func (o *InstallOptions) CheckPluginImageRepo(f client.Factory) error {
 	}
 
 	if repo != "" && tag != "" {
-		o.Image = repo + "/" + utils.DataManagerForPlugin + ":" + tag
+		o.DatamgrImage = repo + "/" + utils.DataManagerForPlugin + ":" + tag
+		o.BackupDriverImage = repo + "/" + utils.BackupDriverForPlugin + ":" + tag
 		return nil
 	} else {
 		errMsg := fmt.Sprint("Failed to get repo and tag from velero plugin image.")
