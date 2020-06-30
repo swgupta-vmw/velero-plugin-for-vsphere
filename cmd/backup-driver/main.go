@@ -22,8 +22,12 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/vmware-tanzu/velero-plugin-for-vsphere/pkg/cmd"
+	"github.com/vmware-tanzu/velero-plugin-for-vsphere/pkg/cmd/datamgr"
 
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
@@ -53,6 +57,7 @@ var (
 )
 
 func main() {
+
 	flag.Set("logtostderr", "true")
 	flag.Parse()
 
@@ -82,6 +87,10 @@ func main() {
 	logger.SetFormatter(formatter)
 
 	logger.Debugf("setting log-level to %s", strings.ToUpper(logLevel.String()))
+
+	baseName := filepath.Base(os.Args[0])
+	err := datamgr.NewCommand(baseName).Execute()
+	cmd.CheckError(err)
 
 	config, err := buildConfig(*master, *kubeConfig)
 	if err != nil {

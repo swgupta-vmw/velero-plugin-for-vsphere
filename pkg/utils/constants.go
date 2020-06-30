@@ -97,4 +97,6 @@ const (
 	VeleroPluginForVsphere string = "velero-plugin-for-vsphere"
 
 	VeleroDeployment string = "velero"
+
+	BackupDriverForPlugin string = "backup-driver"
 )
