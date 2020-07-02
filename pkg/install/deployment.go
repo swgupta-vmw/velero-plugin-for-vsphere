@@ -86,17 +86,27 @@ func Deployment(namespace string, opts ...podTemplateOption) *appsv1.Deployment 
 					},
 					Volumes: []corev1.Volume{
 						{
-							Name: "plugins",
-							VolumeSource: corev1.VolumeSource{
-								EmptyDir: &corev1.EmptyDirVolumeSource{},
-							},
-						},
-						{
 							Name: "scratch",
 							VolumeSource: corev1.VolumeSource{
 								EmptyDir: new(corev1.EmptyDirVolumeSource),
 							},
 						},
+					},
+					Tolerations: []corev1.Toleration{
+						{
+							Effect:   "NoSchedule",
+							Key:      "node-role.kubernetes.io/master",
+							Operator: "Exists",
+						},
+						{
+							Effect:   "NoSchedule",
+							Key:      "kubeadmNode",
+							Operator: "Equal",
+							Value:    "master",
+						},
+					},
+					NodeSelector: map[string]string{
+						"node-role.kubernetes.io/master": "",
 					},
 					Containers: []corev1.Container{
 						{
@@ -111,10 +121,6 @@ func Deployment(namespace string, opts ...podTemplateOption) *appsv1.Deployment 
 								"server",
 							},
 							VolumeMounts: []corev1.VolumeMount{
-								{
-									Name:      "plugins",
-									MountPath: "/plugins",
-								},
 								{
 									Name:      "scratch",
 									MountPath: "/scratch",

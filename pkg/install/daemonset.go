@@ -35,7 +35,6 @@ type podTemplateConfig struct {
 	resources                         corev1.ResourceRequirements
 	withSecret                        bool
 	defaultResticMaintenanceFrequency time.Duration
-	plugins                           []string
 }
 
 func WithImage(image string) podTemplateOption {
@@ -120,12 +119,6 @@ func DaemonSet(namespace string, opts ...podTemplateOption) *appsv1.DaemonSet {
 					},
 					Volumes: []corev1.Volume{
 						{
-							Name: "plugins",
-							VolumeSource: corev1.VolumeSource{
-								EmptyDir: &corev1.EmptyDirVolumeSource{},
-							},
-						},
-						{
 							Name: "scratch",
 							VolumeSource: corev1.VolumeSource{
 								EmptyDir: new(corev1.EmptyDirVolumeSource),
@@ -145,10 +138,6 @@ func DaemonSet(namespace string, opts ...podTemplateOption) *appsv1.DaemonSet {
 							},
 
 							VolumeMounts: []corev1.VolumeMount{
-								{
-									Name:      "plugins",
-									MountPath: "/plugins",
-								},
 								{
 									Name:      "scratch",
 									MountPath: "/scratch",

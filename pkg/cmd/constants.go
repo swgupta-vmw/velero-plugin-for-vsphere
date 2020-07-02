@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0
+http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -14,18 +14,20 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package main
+package cmd
 
-import (
-	"os"
-	"path/filepath"
+const (
+	// the port where prometheus metrics are exposed
+	DefaultMetricsAddress = ":8085"
 
-	"github.com/vmware-tanzu/velero-plugin-for-vsphere/pkg/cmd"
-	"github.com/vmware-tanzu/velero-plugin-for-vsphere/pkg/cmd/backupdriver"
+	// server's client default qps and burst
+	DefaultClientQPS   float32 = 20.0
+	DefaultClientBurst int     = 30
+
+	DefaultProfilerAddress         = "localhost:6060"
+	DefaultInsecureFlag       bool = true
+	DefaultVCConfigFromSecret bool = true
+
+	DefaultControllerWorkers = 1
+	DefaultBackupWorkers     = 1
 )
-
-func main() {
-	baseName := filepath.Base(os.Args[0])
-	err := backupdriver.NewCommand(baseName).Execute()
-	cmd.CheckError(err)
-}

@@ -22,11 +22,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/vmware-tanzu/velero-plugin-for-vsphere/pkg/generated/crds"
 	"github.com/vmware-tanzu/velero-plugin-for-vsphere/pkg/utils"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/wait"
 
 	"github.com/pkg/errors"
 	"github.com/vmware-tanzu/velero-plugin-for-vsphere/pkg/buildinfo"
-	"github.com/vmware-tanzu/velero-plugin-for-vsphere/pkg/generated/crds"
 	"github.com/vmware-tanzu/velero/pkg/client"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -34,9 +36,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/util/wait"
 )
 
 // kindToResource translates a Kind (mixed case, singular) to a Resource (lowercase, plural) string.
@@ -59,6 +59,7 @@ type ResourceGroup struct {
 	OtherResources []*unstructured.Unstructured
 }
 
+// TODO: Update this list with plugin CRDs
 var CRDsList = []string{
 	"backupstoragelocations.velero.io",
 	"volumesnapshotlocations.velero.io",
@@ -81,17 +82,15 @@ var (
 	DefaultBackupDriverPodMemLimit    = "0"
 )
 
-type DatamgrOptions struct {
-	Namespace                string
-	DatamgrImage             string
-	BackupDriverImage        string
-	ProviderName             string
-	Bucket                   string
-	Prefix                   string
-	PodAnnotations           map[string]string
-	DatamgrPodResources      corev1.ResourceRequirements
-	BackupDriverPodResources corev1.ResourceRequirements
-	SecretData               []byte
+type PodOptions struct {
+	Namespace      string
+	Image          string
+	ProviderName   string
+	Bucket         string
+	Prefix         string
+	PodAnnotations map[string]string
+	PodResources   corev1.ResourceRequirements
+	SecretData     []byte
 }
 
 // Use "latest" if the build process didn't supply a version
@@ -353,6 +352,7 @@ func DaemonSetIsReady(factory client.DynamicFactory, namespace string, nNodes in
 	return isReady, err
 }
 
+// TODO: Split CRDs, or only install when backup driver is installed?
 func AllCRDs() *unstructured.UnstructuredList {
 	resources := new(unstructured.UnstructuredList)
 	// Set the GVK so that the serialization framework outputs the list properly
@@ -366,9 +366,9 @@ func AllCRDs() *unstructured.UnstructuredList {
 	return resources
 }
 
-// AllResources returns a list of all resources necessary to install Velero, in the appropriate order, into a Kubernetes cluster.
+// AllDatamgrResources returns a list of all resources necessary to install Datamgr, in the appropriate order, into a Kubernetes cluster.
 // Items are unstructured, since there are different data types returned.
-func AllResources(o *DatamgrOptions, withCRDs bool) (*unstructured.UnstructuredList, error) {
+func AllDatamgrResources(o *PodOptions, withCRDs bool) (*unstructured.UnstructuredList, error) {
 	var resources *unstructured.UnstructuredList
 	if withCRDs {
 		resources = AllCRDs()
@@ -382,17 +382,33 @@ func AllResources(o *DatamgrOptions, withCRDs bool) (*unstructured.UnstructuredL
 	// Datamgr pod
 	ds := DaemonSet(o.Namespace,
 		WithAnnotations(o.PodAnnotations),
-		WithImage(o.DatamgrImage),
-		WithResources(o.DatamgrPodResources),
+		WithImage(o.Image),
+		WithResources(o.PodResources),
 		WithSecret(secretPresent),
 	)
 	appendUnstructured(resources, ds)
 
+	return resources, nil
+}
+
+// AllBackupDriverResources returns a list of all resources necessary to install Datamgr, in the appropriate order, into a Kubernetes cluster.
+// Items are unstructured, since there are different data types returned.
+func AllBackupDriverResources(o *PodOptions, withCRDs bool) (*unstructured.UnstructuredList, error) {
+	var resources *unstructured.UnstructuredList
+	if withCRDs {
+		resources = AllCRDs()
+	} else {
+		resources = new(unstructured.UnstructuredList)
+	}
+
+	// velero secret will not used
+	secretPresent := false
+
 	// BackupDriver pod
 	deploy := Deployment(o.Namespace,
 		WithAnnotations(o.PodAnnotations),
-		WithImage(o.BackupDriverImage),
-		WithResources(o.BackupDriverPodResources),
+		WithImage(o.Image),
+		WithResources(o.PodResources),
 		WithSecret(secretPresent),
 	)
 	appendUnstructured(resources, deploy)
