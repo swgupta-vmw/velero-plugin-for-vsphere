@@ -81,17 +81,16 @@ var (
 	DefaultBackupDriverPodMemLimit    = "0"
 )
 
-type DatamgrOptions struct {
-	Namespace                string
-	DatamgrImage             string
-	BackupDriverImage        string
-	ProviderName             string
-	Bucket                   string
-	Prefix                   string
-	PodAnnotations           map[string]string
-	DatamgrPodResources      corev1.ResourceRequirements
-	BackupDriverPodResources corev1.ResourceRequirements
-	SecretData               []byte
+type PodOptions struct {
+	Namespace      string
+	PkgName        string
+	Image          string
+	ProviderName   string
+	Bucket         string
+	Prefix         string
+	PodAnnotations map[string]string
+	PodResources   corev1.ResourceRequirements
+	SecretData     []byte
 }
 
 // Use "latest" if the build process didn't supply a version
@@ -368,7 +367,7 @@ func AllCRDs() *unstructured.UnstructuredList {
 
 // AllResources returns a list of all resources necessary to install Velero, in the appropriate order, into a Kubernetes cluster.
 // Items are unstructured, since there are different data types returned.
-func AllResources(o *DatamgrOptions, withCRDs bool) (*unstructured.UnstructuredList, error) {
+func AllResources(o *PodOptions, withCRDs bool) (*unstructured.UnstructuredList, error) {
 	var resources *unstructured.UnstructuredList
 	if withCRDs {
 		resources = AllCRDs()
@@ -379,23 +378,26 @@ func AllResources(o *DatamgrOptions, withCRDs bool) (*unstructured.UnstructuredL
 	// velero secret will be used
 	secretPresent := true
 
-	// Datamgr pod
-	ds := DaemonSet(o.Namespace,
-		WithAnnotations(o.PodAnnotations),
-		WithImage(o.DatamgrImage),
-		WithResources(o.DatamgrPodResources),
-		WithSecret(secretPresent),
-	)
-	appendUnstructured(resources, ds)
+	if o.PkgName == utils.DataManagerForPlugin {
+		// Datamgr pod
+		ds := DaemonSet(o.Namespace,
+			WithAnnotations(o.PodAnnotations),
+			WithImage(o.Image),
+			WithResources(o.PodResources),
+			WithSecret(secretPresent),
+		)
+		appendUnstructured(resources, ds)
+	} else {
 
-	// BackupDriver pod
-	deploy := Deployment(o.Namespace,
-		WithAnnotations(o.PodAnnotations),
-		WithImage(o.BackupDriverImage),
-		WithResources(o.BackupDriverPodResources),
-		WithSecret(secretPresent),
-	)
-	appendUnstructured(resources, deploy)
+		// BackupDriver pod
+		deploy := Deployment(o.Namespace,
+			WithAnnotations(o.PodAnnotations),
+			WithImage(o.Image),
+			WithResources(o.PodResources),
+			WithSecret(false),
+		)
+		appendUnstructured(resources, deploy)
+	}
 
 	return resources, nil
 }

@@ -14,18 +14,25 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package main
+package version
 
 import (
+	"fmt"
 	"os"
-	"path/filepath"
 
-	"github.com/vmware-tanzu/velero-plugin-for-vsphere/pkg/cmd"
-	backupdriverInstall "github.com/vmware-tanzu/velero-plugin-for-vsphere/pkg/cmd/backupdriver"
+	"github.com/spf13/cobra"
+
+	"github.com/vmware-tanzu/velero/pkg/client"
 )
 
-func main() {
-	baseName := filepath.Base(os.Args[0])
-	err := backupdriverInstall.NewCommand(baseName).Execute()
-	cmd.CheckError(err)
+func NewCommand(name string, f client.Factory) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "version",
+		Short: "Print the " + name + " version and associated image",
+		Run: func(c *cobra.Command, args []string) {
+			fmt.Fprintf(os.Stdout, "unknown")
+		},
+	}
+
+	return c
 }
