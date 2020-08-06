@@ -660,3 +660,7 @@ func GetBackupRepositoryFromBackupRepositoryName(backupRepositoryName string) (*
 	}
 	return backupRepositoryCR, nil
 }
+
+func GetUploadName(peID astrolabe.ProtectedEntityID) string {
+	return "upload-" + peID.GetSnapshotID().GetID()
+}

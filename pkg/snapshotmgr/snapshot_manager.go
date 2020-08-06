@@ -262,7 +262,8 @@ func (this *SnapshotManager) createSnapshot(peID astrolabe.ProtectedEntityID, ta
 		return updatedPeID, err
 	}
 
-	uploadBuilder := builder.ForUpload(veleroNs, "upload-"+peSnapID.GetID()).BackupTimestamp(time.Now()).NextRetryTimestamp(time.Now()).Phase(v1api.UploadPhaseNew)
+	//uploadBuilder := builder.ForUpload(veleroNs, "upload-"+peSnapID.GetID()).BackupTimestamp(time.Now()).NextRetryTimestamp(time.Now()).Phase(v1api.UploadPhaseNew)
+	uploadBuilder := builder.ForUpload(veleroNs, utils.GetUploadName(updatedPeID)).BackupTimestamp(time.Now()).NextRetryTimestamp(time.Now()).Phase(v1api.UploadPhaseNew)
 	if peID.GetPeType() == astrolabe.PvcPEType {
 		components, err := pe.GetComponents(ctx)
 		if err != nil {
@@ -320,7 +321,7 @@ func (this *SnapshotManager) deleteSnapshot(peID astrolabe.ProtectedEntityID, ba
 		this.WithError(err).Errorf("DeleteSnapshot: Failed to lookup the env variable for velero namespace")
 		return err
 	}
-	uploadName := "upload-" + peID.GetSnapshotID().GetID()
+	uploadName := utils.GetUploadName(peID)
 	log.Infof("Searching for Upload CR: %v", uploadName)
 	uploadCR, err := pluginClient.VeleropluginV1().Uploads(veleroNs).Get(uploadName, metav1.GetOptions{})
 	if err != nil {

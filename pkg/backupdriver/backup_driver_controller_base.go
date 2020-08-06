@@ -25,6 +25,7 @@ import (
 	"github.com/sirupsen/logrus"
 	backupdriverapi "github.com/vmware-tanzu/velero-plugin-for-vsphere/pkg/apis/backupdriver/v1"
 	backupdriverclientset "github.com/vmware-tanzu/velero-plugin-for-vsphere/pkg/generated/clientset/versioned/typed/backupdriver/v1"
+	veleropluginclientset "github.com/vmware-tanzu/velero-plugin-for-vsphere/pkg/generated/clientset/versioned/typed/veleroplugin/v1"
 	backupdriverinformers "github.com/vmware-tanzu/velero-plugin-for-vsphere/pkg/generated/informers/externalversions"
 	backupdriverlisters "github.com/vmware-tanzu/velero-plugin-for-vsphere/pkg/generated/listers/backupdriver/v1"
 	"github.com/vmware-tanzu/velero-plugin-for-vsphere/pkg/snapshotmgr"
@@ -50,70 +51,55 @@ type backupDriverController struct {
 	// Supervisor Cluster KubeClient for Guest Cluster
 	svcKubeConfig *rest.Config
 
-	backupdriverClient *backupdriverclientset.BackupdriverV1Client
+	backupdriverClient    *backupdriverclientset.BackupdriverV1Client
+	veleropluginClient    *veleropluginclientset.VeleropluginV1Client
+	svcBackupdriverClient *backupdriverclientset.BackupdriverV1Client
 
 	// Supervisor Cluster namespace
-	supervisorNamespace string
+	svcNamespace string
 
 	rateLimiter workqueue.RateLimiter
 
+	// All the initialized cache sync
+	cacheSyncs []cache.InformerSynced
+
 	// PV Lister
 	pvLister corelisters.PersistentVolumeLister
-	// PV Synced
-	pvSynced cache.InformerSynced
 
 	// PVC Lister
 	pvcLister corelisters.PersistentVolumeClaimLister
-	// PVC Synced
-	pvcSynced cache.InformerSynced
 	// claim queue
 	claimQueue workqueue.RateLimitingInterface
 
 	// Supervisor Cluster PVC Lister
 	svcPVCLister corelisters.PersistentVolumeClaimLister
-	// Supervisor Cluster PVC Synced
-	svcPVCSynced cache.InformerSynced
 
 	// BackupRepositoryClaim Lister
 	backupRepositoryClaimLister backupdriverlisters.BackupRepositoryClaimLister
-	// BackupRepositoryClaim Synced
-	backupRepositoryClaimSynced cache.InformerSynced
 	// backupRepositoryClaim queue
 	backupRepositoryClaimQueue workqueue.RateLimitingInterface
 
 	// Supervisor Cluster BackupRepositoryClaim Lister
 	svcBackupRepositoryClaimLister backupdriverlisters.BackupRepositoryClaimLister
-	// Supervisor Cluster BackupRepositoryClaim Synced
-	svcBackupRepositoryClaimSynced cache.InformerSynced
 
 	// BackupRepository Lister
 	backupRepositoryLister backupdriverlisters.BackupRepositoryLister
-	// BackupRepository Synced
-	backupRepositorySynced cache.InformerSynced
 
 	// Snapshot queue
 	snapshotQueue workqueue.RateLimitingInterface
 	// Snapshot Lister
 	snapshotLister backupdriverlisters.SnapshotLister
-	// Snapshot Synced
-	snapshotSynced cache.InformerSynced
 
-	// Supervisor Cluster Snapshot Lister
-	svcSnapshotLister backupdriverlisters.SnapshotLister
-	// Supervisor Cluster Snapshot Synced
-	svcSnapshotSynced cache.InformerSynced
+	// Supervisor snapshot queue in guest
+	svcSnapshotQueue workqueue.RateLimitingInterface
 
 	// CloneFromSnapshot queue
 	cloneFromSnapshotQueue workqueue.RateLimitingInterface
 	// CloneFromSnapshot Lister
 	cloneFromSnapshotLister backupdriverlisters.CloneFromSnapshotLister
-	// CloneFromSnapshot Synced
-	cloneFromSnapshotSynced cache.InformerSynced
 
 	// Supervisor Cluster CloneFromSnapshot Lister
 	svcCloneFromSnapshotLister backupdriverlisters.CloneFromSnapshotLister
-	// Supervisor Cluster CloneFromSnapshot Synced
-	svcCloneFromSnapshotSynced cache.InformerSynced
 
 	// Snapshot queue
 	deleteSnapshotQueue workqueue.RateLimitingInterface
@@ -121,6 +107,9 @@ type backupDriverController struct {
 	deleteSnapshotLister backupdriverlisters.DeleteSnapshotLister
 	// Snapshot Synced
 	deleteSnapshotSynced cache.InformerSynced
+
+	// Local Mode flag
+	localMode bool
 
 	// Snapshot manager
 	snapManager *snapshotmgr.SnapshotManager
@@ -131,81 +120,84 @@ func NewBackupDriverController(
 	name string,
 	logger logrus.FieldLogger,
 	backupdriverClient *backupdriverclientset.BackupdriverV1Client,
+	veleropluginclientset *veleropluginclientset.VeleropluginV1Client,
+	svcBackupdriverClient *backupdriverclientset.BackupdriverV1Client,
 	svcKubeConfig *rest.Config,
-	supervisorNamespace string,
+	svcNamespace string,
 	resyncPeriod time.Duration,
 	informerFactory informers.SharedInformerFactory,
 	backupdriverInformerFactory backupdriverinformers.SharedInformerFactory,
+	svcInformerFactory informers.SharedInformerFactory,
+	svcBackupdriverInformerFactory backupdriverinformers.SharedInformerFactory,
+	localMode bool,
 	snapManager *snapshotmgr.SnapshotManager,
 	rateLimiter workqueue.RateLimiter) BackupDriverController {
-	// TODO: Fix svcPVCInformer to use svcInformerFactory
-	svcPVCInformer := informerFactory.Core().V1().PersistentVolumeClaims()
-	//svcPVCInformer := svcInformerFactory.Core().V1().PersistentVolumeClaims()
+
+	var cacheSyncs []cache.InformerSynced
+
 	pvcInformer := informerFactory.Core().V1().PersistentVolumeClaims()
 	pvInformer := informerFactory.Core().V1().PersistentVolumes()
 
 	backupRepositoryInformer := backupdriverInformerFactory.Backupdriver().V1().BackupRepositories()
-
 	backupRepositoryClaimInformer := backupdriverInformerFactory.Backupdriver().V1().BackupRepositoryClaims()
-	// TODO: Use svcBackupdriverInformerFactory for svcBackupRepositoryClaimInformer
-	svcBackupRepositoryClaimInformer := backupdriverInformerFactory.Backupdriver().V1().BackupRepositoryClaims()
-
 	snapshotInformer := backupdriverInformerFactory.Backupdriver().V1().Snapshots()
-	// TODO: Use svcBackupdriverInformerFactory for svcSnapshotInformer
-	svcSnapshotInformer := backupdriverInformerFactory.Backupdriver().V1().Snapshots()
-
 	cloneFromSnapshotInformer := backupdriverInformerFactory.Backupdriver().V1().CloneFromSnapshots()
-	// TODO: Use svcBackupdriverInformerFactor for svcCloneFromSnapshotInformer
-	svcCloneFromSnapshotInformer := backupdriverInformerFactory.Backupdriver().V1().CloneFromSnapshots()
-
 	deleteSnapshotInformer := backupdriverInformerFactory.Backupdriver().V1().DeleteSnapshots()
 
+	cacheSyncs = append(cacheSyncs,
+		pvcInformer.Informer().HasSynced,
+		pvInformer.Informer().HasSynced,
+		backupRepositoryInformer.Informer().HasSynced,
+		backupRepositoryClaimInformer.Informer().HasSynced,
+		snapshotInformer.Informer().HasSynced,
+		cloneFromSnapshotInformer.Informer().HasSynced,
+		deleteSnapshotInformer.Informer().HasSynced)
 
-	claimQueue := workqueue.NewNamedRateLimitingQueue(
-		rateLimiter, "backup-driver-claim-queue")
-	snapshotQueue := workqueue.NewNamedRateLimitingQueue(
-		rateLimiter, "backup-driver-snapshot-queue")
-	cloneFromSnapshotQueue := workqueue.NewNamedRateLimitingQueue(
-		rateLimiter, "backup-driver-clone-queue")
-	backupRepositoryClaimQueue := workqueue.NewNamedRateLimitingQueue(
-		rateLimiter, "backup-driver-brc-queue")
-	deleteSnapshotQueue := workqueue.NewNamedRateLimitingQueue(
-		rateLimiter, "backup-driver-delete-snapshot-queue")
+	claimQueue := workqueue.NewNamedRateLimitingQueue(rateLimiter, "backup-driver-claim-queue")
+	snapshotQueue := workqueue.NewNamedRateLimitingQueue(rateLimiter, "backup-driver-snapshot-queue")
+	cloneFromSnapshotQueue := workqueue.NewNamedRateLimitingQueue(rateLimiter, "backup-driver-clone-queue")
+	backupRepositoryClaimQueue := workqueue.NewNamedRateLimitingQueue(rateLimiter, "backup-driver-brc-queue")
+	deleteSnapshotQueue := workqueue.NewNamedRateLimitingQueue(rateLimiter, "backup-driver-delete-snapshot-queue")
+
+	// Configure supervisor cluster queues and caches in the guest
+	svcSnapshotQueue := workqueue.NewNamedRateLimitingQueue(rateLimiter, "backup-driver-svc-snapshot-queue")
+	if svcKubeConfig != nil {
+		svcSnapshotInformer := svcBackupdriverInformerFactory.Backupdriver().V1().Snapshots()
+		//svcPVCInformer := svcInformerFactory.Core().V1().PersistentVolumeClaims()
+		svcBackupRepositoryClaimInformer := svcBackupdriverInformerFactory.Backupdriver().V1().BackupRepositoryClaims()
+		svcCloneFromSnapshotInformer := svcBackupdriverInformerFactory.Backupdriver().V1().CloneFromSnapshots()
+
+		cacheSyncs = append(cacheSyncs,
+			svcSnapshotInformer.Informer().HasSynced,
+			//svcPVCInformer.Informer().HasSynced,
+			svcBackupRepositoryClaimInformer.Informer().HasSynced,
+			svcCloneFromSnapshotInformer.Informer().HasSynced)
+	}
 
 	ctrl := &backupDriverController{
-		name:                           name,
-		logger:                         logger.WithField("controller", name),
-		svcKubeConfig:                  svcKubeConfig,
-		backupdriverClient:             backupdriverClient,
-		supervisorNamespace:            supervisorNamespace,
-		pvLister:                       pvInformer.Lister(),
-		pvSynced:                       pvInformer.Informer().HasSynced,
-		pvcLister:                      pvcInformer.Lister(),
-		pvcSynced:                      pvcInformer.Informer().HasSynced,
-		claimQueue:                     claimQueue,
-		svcPVCLister:                   svcPVCInformer.Lister(),
-		svcPVCSynced:                   svcPVCInformer.Informer().HasSynced,
-		backupRepositoryClaimLister:    backupRepositoryClaimInformer.Lister(),
-		backupRepositoryClaimSynced:    backupRepositoryClaimInformer.Informer().HasSynced,
-		backupRepositoryClaimQueue:     backupRepositoryClaimQueue,
-		svcBackupRepositoryClaimLister: svcBackupRepositoryClaimInformer.Lister(),
-		svcBackupRepositoryClaimSynced: svcBackupRepositoryClaimInformer.Informer().HasSynced,
-		backupRepositoryLister:         backupRepositoryInformer.Lister(),
-		backupRepositorySynced:         backupRepositoryInformer.Informer().HasSynced,
-		snapshotQueue:                  snapshotQueue,
-		snapshotLister:                 snapshotInformer.Lister(),
-		snapshotSynced:                 snapshotInformer.Informer().HasSynced,
-		svcSnapshotLister:              svcSnapshotInformer.Lister(),
-		svcSnapshotSynced:              svcSnapshotInformer.Informer().HasSynced,
-		cloneFromSnapshotQueue:         cloneFromSnapshotQueue,
-		cloneFromSnapshotLister:        cloneFromSnapshotInformer.Lister(),
-		cloneFromSnapshotSynced:        cloneFromSnapshotInformer.Informer().HasSynced,
-		svcCloneFromSnapshotLister:     svcCloneFromSnapshotInformer.Lister(),
-		svcCloneFromSnapshotSynced:     svcCloneFromSnapshotInformer.Informer().HasSynced,
-		deleteSnapshotQueue:            deleteSnapshotQueue,
-		deleteSnapshotLister:           deleteSnapshotInformer.Lister(),
-		deleteSnapshotSynced:           deleteSnapshotInformer.Informer().HasSynced,
-		snapManager:                    snapManager,
+		name:                        name,
+		logger:                      logger.WithField("controller", name),
+		svcKubeConfig:               svcKubeConfig,
+		backupdriverClient:          backupdriverClient,
+		veleropluginClient:          veleropluginclientset,
+		svcBackupdriverClient:       svcBackupdriverClient,
+		snapManager:                 snapManager,
+		pvLister:                    pvInformer.Lister(),
+		pvcLister:                   pvcInformer.Lister(),
+		claimQueue:                  claimQueue,
+		svcNamespace:                svcNamespace,
+		snapshotLister:              snapshotInformer.Lister(),
+		snapshotQueue:               snapshotQueue,
+		cloneFromSnapshotLister:     cloneFromSnapshotInformer.Lister(),
+		cloneFromSnapshotQueue:      cloneFromSnapshotQueue,
+		backupRepositoryLister:      backupRepositoryInformer.Lister(),
+		backupRepositoryClaimLister: backupRepositoryClaimInformer.Lister(),
+		backupRepositoryClaimQueue:  backupRepositoryClaimQueue,
+		deleteSnapshotQueue:         deleteSnapshotQueue,
+		deleteSnapshotLister:        deleteSnapshotInformer.Lister(),
+		svcSnapshotQueue:            svcSnapshotQueue,
+		cacheSyncs:                  cacheSyncs,
+		localMode:                   localMode,
 	}
 
 	pvcInformer.Informer().AddEventHandlerWithResyncPeriod(
@@ -216,12 +208,6 @@ func NewBackupDriverController(
 		},
 		resyncPeriod,
 	)
-
-	svcPVCInformer.Informer().AddEventHandlerWithResyncPeriod(cache.ResourceEventHandlerFuncs{
-		//AddFunc:    rc.svcAddPVC,
-		//UpdateFunc: rc.svcUpdatePVC,
-		//DeleteFunc: rc.svcDeletePVC,
-	}, resyncPeriod)
 
 	pvInformer.Informer().AddEventHandlerWithResyncPeriod(cache.ResourceEventHandlerFuncs{
 		//AddFunc:    rc.addPV,
@@ -238,12 +224,6 @@ func NewBackupDriverController(
 		resyncPeriod,
 	)
 
-	svcSnapshotInformer.Informer().AddEventHandlerWithResyncPeriod(cache.ResourceEventHandlerFuncs{
-		//AddFunc:    rc.svcAddSnapshot,
-		//UpdateFunc: rc.svcUpdateSnapshot,
-		//DeleteFunc: rc.svcDeleteSnapshot,
-	}, resyncPeriod)
-
 	cloneFromSnapshotInformer.Informer().AddEventHandlerWithResyncPeriod(
 		cache.ResourceEventHandlerFuncs{
 			AddFunc:    func(obj interface{}) { ctrl.enqueueCloneFromSnapshot(obj) },
@@ -252,12 +232,6 @@ func NewBackupDriverController(
 		},
 		resyncPeriod,
 	)
-
-	svcCloneFromSnapshotInformer.Informer().AddEventHandlerWithResyncPeriod(cache.ResourceEventHandlerFuncs{
-		//AddFunc:    rc.svcAddCloneFromSnapshot,
-		//UpdateFunc: rc.svcUpdateCloneFromSnapshot,
-		//DeleteFunc: rc.svcDeleteCloneFromSnapshot,
-	}, resyncPeriod)
 
 	backupRepositoryInformer.Informer().AddEventHandlerWithResyncPeriod(cache.ResourceEventHandlerFuncs{
 		//AddFunc:    rc.addBackupRepository,
@@ -274,12 +248,6 @@ func NewBackupDriverController(
 		resyncPeriod,
 	)
 
-	svcBackupRepositoryClaimInformer.Informer().AddEventHandlerWithResyncPeriod(cache.ResourceEventHandlerFuncs{
-		//AddFunc:    rc.svcAddBackupRepositoryClaim,
-		//UpdateFunc: rc.svcUpdateBackupRepositoryClaim,
-		//DeleteFunc: rc.svcDeleteBackupRepositoryClaim,
-	}, resyncPeriod)
-
 	deleteSnapshotInformer.Informer().AddEventHandlerWithResyncPeriod(
 		cache.ResourceEventHandlerFuncs{
 			AddFunc:    func(obj interface{}) { ctrl.enqueueDeleteSnapshot(obj) },
@@ -288,6 +256,42 @@ func NewBackupDriverController(
 		},
 		resyncPeriod,
 	)
+
+	// Configure supervisor cluster informers in the guest
+	if svcKubeConfig != nil {
+		svcSnapshotInformer := svcBackupdriverInformerFactory.Backupdriver().V1().Snapshots()
+		svcSnapshotInformer.Informer().AddEventHandlerWithResyncPeriod(
+			cache.ResourceEventHandlerFuncs{
+				//AddFunc:    rc.svcAddSnapshot,
+				//UpdateFunc: rc.svcUpdateSnapshot,
+				//DeleteFunc: rc.svcDeleteSnapshot,
+			},
+			resyncPeriod)
+
+		svcBackupRepositoryClaimInformer := svcBackupdriverInformerFactory.Backupdriver().V1().BackupRepositoryClaims()
+		svcBackupRepositoryClaimInformer.Informer().AddEventHandlerWithResyncPeriod(cache.ResourceEventHandlerFuncs{
+			//AddFunc:    rc.svcAddBackupRepositoryClaim,
+			//UpdateFunc: rc.svcUpdateBackupRepositoryClaim,
+			//DeleteFunc: rc.svcDeleteBackupRepositoryClaim,
+		}, resyncPeriod)
+
+		/*
+			// TODO: update ProviserServiceAccount permissions before enabling this
+			svcPVCInformer := svcInformerFactory.Core().V1().PersistentVolumeClaims()
+			svcPVCInformer.Informer().AddEventHandlerWithResyncPeriod(cache.ResourceEventHandlerFuncs{
+				//AddFunc:    rc.svcAddPVC,
+				//UpdateFunc: rc.svcUpdatePVC,
+				//DeleteFunc: rc.svcDeletePVC,
+			}, resyncPeriod)
+		*/
+
+		svcCloneFromSnapshotInformer := svcBackupdriverInformerFactory.Backupdriver().V1().CloneFromSnapshots()
+		svcCloneFromSnapshotInformer.Informer().AddEventHandlerWithResyncPeriod(cache.ResourceEventHandlerFuncs{
+			//AddFunc:    rc.svcAddCloneFromSnapshot,
+			//UpdateFunc: rc.svcUpdateCloneFromSnapshot,
+			//DeleteFunc: rc.svcDeleteCloneFromSnapshot,
+		}, resyncPeriod)
+	}
 
 	return ctrl
 }
@@ -310,9 +314,11 @@ func (ctrl *backupDriverController) getKey(obj interface{}) (string, error) {
 func (ctrl *backupDriverController) Run(
 	ctx context.Context, workers int) {
 	defer ctrl.claimQueue.ShutDown()
+	defer ctrl.backupRepositoryClaimQueue.ShutDown()
 	defer ctrl.snapshotQueue.ShutDown()
 	defer ctrl.cloneFromSnapshotQueue.ShutDown()
 	defer ctrl.deleteSnapshotQueue.ShutDown()
+	defer ctrl.svcSnapshotQueue.ShutDown()
 
 	ctrl.logger.Infof("Starting backup driver controller")
 	defer ctrl.logger.Infof("Shutting down backup driver controller")
@@ -320,7 +326,8 @@ func (ctrl *backupDriverController) Run(
 	stopCh := ctx.Done()
 
 	ctrl.logger.Infof("Waiting for caches to sync")
-	if !cache.WaitForCacheSync(stopCh, ctrl.pvSynced, ctrl.pvcSynced, ctrl.svcPVCSynced, ctrl.backupRepositorySynced, ctrl.backupRepositoryClaimSynced, ctrl.svcBackupRepositoryClaimSynced, ctrl.snapshotSynced, ctrl.svcSnapshotSynced, ctrl.cloneFromSnapshotSynced, ctrl.svcCloneFromSnapshotSynced) {
+
+	if !cache.WaitForCacheSync(stopCh, ctrl.cacheSyncs...) {
 		ctrl.logger.Errorf("Cannot sync caches")
 		return
 	}
@@ -329,13 +336,19 @@ func (ctrl *backupDriverController) Run(
 	for i := 0; i < workers; i++ {
 		//go wait.Until(ctrl.pvcWorker, 0, stopCh)
 		//go wait.Until(ctrl.pvWorker, 0, stopCh)
-		//go wait.Until(ctrl.svcPvcWorker, 0, stopCh)
 		go wait.Until(ctrl.snapshotWorker, 0, stopCh)
-		//go wait.Until(ctrl.svcSnapshotWorker, 0, stopCh)
 		go wait.Until(ctrl.cloneFromSnapshotWorker, 0, stopCh)
-		//go wait.Until(ctrl.svcCloneFromSnapshotWorker, 0, stopCh)
 		go wait.Until(ctrl.backupRepositoryClaimWorker, 0, stopCh)
 		go wait.Until(ctrl.deleteSnapshotWorker, 0, stopCh)
+
+		/*
+			if ctrl.svcKubeConfig != nil {
+				go wait.Until(ctrl.svcSnapshotWorker, 0, stopCh)
+				go wait.Until(ctrl.svcPvcWorker, 0, stopCh)
+				go wait.Until(ctrl.svcCloneFromSnapshotWorker, 0, stopCh)
+
+			}
+		*/
 	}
 
 	<-stopCh
@@ -412,6 +425,9 @@ func (ctrl *backupDriverController) enqueueSnapshot(obj interface{}) {
 	}
 }
 
+func (ctrl *backupDriverController) svcSnapshotWorker() {
+}
+
 func (ctrl *backupDriverController) pvcWorker() {
 }
 
@@ -419,9 +435,6 @@ func (ctrl *backupDriverController) svcPvcWorker() {
 }
 
 func (ctrl *backupDriverController) pvWorker() {
-}
-
-func (ctrl *backupDriverController) svcSnapshotWorker() {
 }
 
 // cloneFromSnapshotWorker is the main worker for restore request.
@@ -511,7 +524,7 @@ func (ctrl *backupDriverController) svcCloneFromSnapshotWorker() {
 }
 
 func (ctrl *backupDriverController) backupRepositoryClaimWorker() {
-	ctrl.logger.Debugf("backupRepositoryClaim: Enter backupRepositoryClaimWorker")
+	ctrl.logger.Infof("backupRepositoryClaimWorker: Enter backupRepositoryClaimWorker")
 
 	key, quit := ctrl.backupRepositoryClaimQueue.Get()
 	if quit {
@@ -553,7 +566,7 @@ func (ctrl *backupDriverController) syncBackupRepositoryClaimByKey(key string) e
 		var svcBackupRepositoryName string
 		// In case of guest clusters, create BackupRepositoryClaim in the supervisor namespace
 		if ctrl.svcKubeConfig != nil {
-			svcBackupRepositoryName, err = ClaimSvcBackupRepository(ctx, brc, ctrl.svcKubeConfig, ctrl.supervisorNamespace, ctrl.logger)
+			svcBackupRepositoryName, err = ClaimSvcBackupRepository(ctx, brc, ctrl.svcKubeConfig, ctrl.svcNamespace, ctrl.logger)
 			if err != nil {
 				ctrl.logger.Errorf("Failed to create Supervisor BackupRepositoryClaim")
 				return err

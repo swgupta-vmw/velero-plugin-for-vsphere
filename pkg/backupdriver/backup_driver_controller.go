@@ -22,6 +22,12 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"os"
+	"strings"
+
+	"github.com/vmware-tanzu/velero-plugin-for-vsphere/pkg/snapshotUtils"
+
+	"github.com/vmware-tanzu/velero-plugin-for-vsphere/pkg/utils"
 
 	"github.com/vmware-tanzu/astrolabe/pkg/astrolabe"
 	backupdriverapi "github.com/vmware-tanzu/velero-plugin-for-vsphere/pkg/apis/backupdriver/v1"
@@ -123,8 +129,35 @@ func (ctrl *backupDriverController) createSnapshot(snapshot *backupdriverapi.Sna
 
 	snapshot, err = ctrl.backupdriverClient.Snapshots(snapshotClone.Namespace).UpdateStatus(snapshotClone)
 	if err != nil {
-		ctrl.logger.Infof("createSnapshot: update status fro snapshot %s/%s failed: %v", snapshotClone.Namespace, snapshotClone.Name, err)
+		ctrl.logger.Infof("createSnapshot: update status for snapshot %s/%s failed: %v", snapshotClone.Namespace, snapshotClone.Name, err)
 		return err
+	}
+
+	// If we are not in local mode, watch for upload status change and update the status in the snapshot CR
+	if !ctrl.localMode {
+		ctrl.logger.Infof("createSnapshot %s/%s Waiting for upload phase status", snapshot.Namespace, snapshot.Name)
+		// For guest cluster, watch for the upload status in the corresponding supervisor snapshot CR
+		if ctrl.svcKubeConfig != nil {
+			// Get the supervisor snapshot name from the loacal snapshot ID
+			statusSnapshotId := strings.Split(snapshot.Status.SnapshotID, ":")
+			svcSnapshotName := statusSnapshotId[len(statusSnapshotId)-1]
+			err = snapshotUtils.WatchSvcSnapshotAndUpdateSnapshotStatus(ctx, snapshot, ctrl.backupdriverClient,
+				svcSnapshotName, ctrl.svcNamespace, ctrl.svcBackupdriverClient, ctrl.logger)
+		} else {
+			// Watch for upload status in the upload CR
+			uploadName := utils.GetUploadName(peID)
+			// look up velero namespace from the env variable in container
+			veleroNs, exist := os.LookupEnv("VELERO_NAMESPACE")
+			if exist {
+				err = snapshotUtils.WatchUploadAndUpdateSnapshotStatus(ctx, snapshot, uploadName, veleroNs,
+					ctrl.backupdriverClient, ctrl.veleropluginClient, ctrl.logger)
+			} else {
+				err = errors.New("CreateSnapshot: Failed to lookup the env variable for velero namespace")
+			}
+		}
+		if err != nil {
+			ctrl.logger.WithError(err).Infof("Failed to update upload status. We would still consider CreateSnapshot successful")
+		}
 	}
 
 	ctrl.logger.Infof("createSnapshot %s/%s completed with snapshotID: %s, phase in status updated to %s", snapshot.Namespace, snapshot.Name, snapshotID, snapshot.Status.Phase)
@@ -260,6 +293,5 @@ func (ctrl *backupDriverController) cloneFromSnapshot(cloneFromSnapshot *backupd
 	}
 
 	ctrl.logger.Infof("A new volume %s with type being %s was just created from the call of SnapshotManager cloneFromSnapshot", returnVolumeID, returnVolumeType)
-
 	return nil
 }
